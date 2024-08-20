@@ -2,6 +2,7 @@
 using System.IO;
 using System.Reflection.Metadata;
 using System.Threading.Tasks;
+using MassTransit;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using NLog;
@@ -13,18 +14,16 @@ class Program
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger(); //初始化記錄器
     #region 名詞解說
     /*
-    == JavaScript
-        ●同步 synchronous ：(JavaScript 是單執行緒的程式語言) 一行程式碼執行完才會再執行下一行。但(耗時任務)時間過久使用者會以為是當機，於是有了非同步。
-        ●非同步 asynchronous ：
-            (1)執行時不必待程式完成，而是繼續執行下面代碼，直到任務完成再通知。(如 文件操作、數據庫操作、AJAX 以及定時器)
-                非同步的程式碼或事件，並不會阻礙主線程執行其他程式碼。
-            (2)JavaScript 有兩種實現非同步的方式：
-                1.回調函式 callback function(缺點：callback hell)  2.promise (演變優化第一種產生的)
-        ●promise：(可看作是一種處理非同步操作結果的方式)。這個約定請求會在未來每個時刻返回數據給調用者。Promise 是用來表示一個非同步操作的最终完成（或失敗）及其结果值。
+    == 
+        ●同步 synchronous ： 一行程式碼執行完才會再執行下一行。但(耗時任務)時間過久使用者會以為是當機，於是有了非同步。
+        ●非同步 asynchronous ：非同步在背景操作，主線程可執行其他工作(但非可執行下一行程式)，需待非同步做完後 才會再做主線程的下一行程式。
     == .Net
-        ●await：為一種語法，Async 和await是程式碼標記，它標記程式碼位置為任務完成後控制項應該恢復的位置
-                →與async 搭配透過await 知道斷點在哪，於此要呈現結果後，才再繼續執行主線程！
-                在非同步函式中我們可以調用其他的非同步函式，使用 await 語法會等待 Task 完成之後直接返回最終的結果。
+        ●await：為一種語法
+                1.await 有在使用函式時宣告，就會先將其做完處理，才會再做後續的。(延遲大才會看的出結果)
+                2.await 有在使用函式時宣告，才承認功能，不然沒宣告就算函式內有await 也不理會。
+                3.遇同步一定執行完後才做下一步。
+                  非同步await在背景執行時，主線程一樣可執行(其他工作)，但非他會直接執行下行程式！
+                  仍需等待await做完後才會執行主線程的下行程式。
 
         ●Task ：(為非同步不論有無使用 async).NET版的promise。
                 可以返回一個結果 (Task<T>)，或者表示一個完成的操作 (Task)。如果需要返回值，比如一個整數，會使用 Task<int>；如果沒有返回值，就用 Task。
@@ -41,35 +40,57 @@ class Program
      */
     #endregion
 
-    static async Task Main(string[] args)  //async為可使用異位函式，搭配 await 語法。以Task返回結果。
-    {
-        // 打印顯示目前路徑。 //由Directory.GetCurrentDirectory取得當前工作目錄路徑，確認基目錄位置 (根目錄通常 .sln 文件所在的目錄就是專案的根目錄)
+    static async Task Main(string[] args)  //async為使用非同步函式，搭配 await 語法。以Task返回結果。
+    {        
+        //Directory.GetCurrentDirectory()：預設根目錄(通常.sln 文件所在的目錄)。但有更改nlog.config為相對路徑，所以就依相對路徑顯示。
         Console.WriteLine("Current Directory: " + Directory.GetCurrentDirectory());
 
         #region 設定log檔名稱及位置
-        //使用 ConfigurationBuilder：1.路徑為基目錄 2.讀取 JSON 設定檔(檔名jsconfig1.json)。
+        //使用 ConfigurationBuilder：1.告知路徑 2.讀取 JSON 設定檔(檔名jsconfig1.json)。
+        //不可在根目錄和相對路徑都同時存著.json。這樣刪掉相對路徑，程式會自己長出來。造成 optional 失效。
         var configuration = new ConfigurationBuilder()
-            .SetBasePath(Directory.GetCurrentDirectory()) //設置配置文件的基路徑為當前目錄
-            .AddJsonFile("jsconfig1.json",optional:false, reloadOnChange:true) //檔案配置名稱 //optional：false，如果配置文件不存在，應用程式將拋出錯誤，並停止運行。 //reloadOnChange：當配置文件內容發生變化時，是否自動重新載入配置
+            //.SetBasePath(Directory.GetCurrentDirectory()) 
+            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory) // 設定根目錄為基準目錄
+            .AddJsonFile("jsconfig1.json", optional: false, reloadOnChange: true) //檔案配置名稱 //optional：false，如果配置文件不存在，應用程式將拋出錯誤，並停止運行。 //reloadOnChange：當配置文件內容發生變化時，是否自動重新載入配置 →仍有錯
             .Build();
         #endregion
 
-        #region 將任務內容做執行
-        //從配置中(jsconfig1.json)提取名為 "Settings" 的節點，並將將此區段轉換為 Setting[] 陣列
-        var Settings = configuration.GetSection("Settings").Get<SettingTime[]>();
+        /*
+        #region 監控配置文件的變更
+        // 使用 FileSystemWatcher 監控配置文件的變更
+        var fileWatcher = new FileSystemWatcher(AppDomain.CurrentDomain.BaseDirectory, "jsconfig1.json");
+        fileWatcher.Changed += (sender, eventArgs) =>
+        {
+            Console.WriteLine("Configuration file changed. Reloading...");
+            // 手動重新加載配置
+            configuration.Reload();
+            // 重新獲取設定值，假設需要的話
+            var settings = configuration.GetSection("Settings").Get<SettingTime[]>();
+            // 可以在這裡重新排程或更新其他相關的操作
+        };
+        fileWatcher.EnableRaisingEvents = true;
+        #endregion
+        */
 
+        // IScheduler 排程任務 預設排程器(從StdSchedulerFactory取得)
+        // 可在 Main 方法中進行一次，確保所有排程任務都使用同一個排程器實例 // IScheduler可以使用多個，但通常不建議。因為增加系統複雜和資源需求。(在多個不同task使用一個，也算多個)
+        IScheduler scheduler = await StdSchedulerFactory.GetDefaultScheduler();
+        await scheduler.Start(); //初始化及啟動排程器
+
+        //將任務內容做執行。從配置中(jsconfig1.json)提取名為 "Settings" 的節點，並將將此區段轉換為 Setting[] 陣列
+        var Settings = configuration.GetSection("Settings").Get<SettingTime[]>();
         foreach (var setting in Settings)
         {
             if (setting.Type == 1)//每隔幾秒記錄
             {
-                await ScheduleIntervalTask(setting.IntervalSeconds); 
+                ScheduleIntervalTask(setting.IntervalSeconds, scheduler); //改同步
             }
             else if (setting.Type == 2)//指定時間記錄
             {
-                await ScheduleSpecificTimeTask(setting.ScheduledTime); 
+                await ScheduleSpecificTimeTask(setting.ScheduledTime, scheduler);                
             }
         }
-        #endregion
+
         Console.ReadLine();
     }
 
@@ -78,33 +99,32 @@ class Program
     /// </summary>
     /// <param name="intervalSeconds"></param>
     /// <returns></returns>
-    private static async Task ScheduleIntervalTask(int intervalSeconds)
-    {
-        #region 預設排程器
-        // 每間隔指定時間打印當下時間並記錄至Log // Quartz scheduler
-        // 預設排程器(從StdSchedulerFactory取得)，設定為非同步方式。 (可避免程式阻塞，並允許在等待排程器創建的同時執行其他操作。)
-        // IScheduler可以使用多個，但通常不建議。因為增加系統複雜和資源需求。(在多個不同task使用一個，也算多個)
-        IScheduler scheduler = await StdSchedulerFactory.GetDefaultScheduler(); 
-        await scheduler.Start(); //初始化及啟動排程器，根據 IJobDetail 和 ITrigger來執行排程的任務
-        #endregion
+    private static async Task ScheduleIntervalTask(int intervalSeconds, IScheduler scheduler)
+    {   //await scheduler.Start(); //初始化及啟動排程器
 
         #region 工作詳細信息定義
-        IJobDetail job = JobBuilder.Create<IntervalJob>()
-            .WithIdentity("intervalJob", "group1")  //WithIdentity 方法用來設置工作的名稱,ID
+        IJobDetail job = JobBuilder.Create<LogShow>()
+            .WithIdentity("intervalJob", "group1")  //設置工作的名稱,組名 //名稱+組名為key。不同job若名稱組名一樣 後者會蓋掉前者→所以不要用相同 //但可以同組名 不同名稱 會認為不同
             .Build();
         #endregion
 
         #region 設定觸發器
         ITrigger trigger = TriggerBuilder.Create()
-            .WithIdentity("intervalTrigger", "group1") //觸發器的名稱,ID
-            .StartNow() //設定觸發器從當前時間開始立即啟動
+            .WithIdentity("intervalTrigger", "group1") //觸發器的名稱,ID ，概同job
+                                                       //.StartNow() //設定觸發器從當前時間開始立即啟動。若重覆疑慮可不用執行。
             .WithSimpleSchedule(x => x
-                .WithIntervalInSeconds(intervalSeconds) //設定觸發器的執行間隔，單位為秒。intervalSeconds 是從設定檔或程式碼中取得的間隔時間
+                .WithIntervalInSeconds(intervalSeconds) //設定觸發器的執行間隔，單位為秒。
                 .RepeatForever()) //設定觸發器永遠重複執行，除非手動停止
-            .Build();
+            .Build(); //放最後，因為要整合參數
         #endregion
 
         await scheduler.ScheduleJob(job, trigger);
+        //scheduler.PauseAll(); //有打開 會抓到第一次
+        /* 排程器 暫停又打開 測試應該沒有關係
+        //scheduler.PauseAll();
+        //await Task.Delay(TimeSpan.FromSeconds(1));
+        //await scheduler.ResumeAll();
+        */
     }
 
     /// <summary>
@@ -112,19 +132,17 @@ class Program
     /// </summary>
     /// <param name="scheduledTime"></param>
     /// <returns></returns>
-    private static async Task ScheduleSpecificTimeTask(DateTime scheduledTime)
-    {
-        // 實現特定時間打印當下時間並記錄至Log
-        IScheduler scheduler = await StdSchedulerFactory.GetDefaultScheduler();
-        await scheduler.Start();
+    private static async Task ScheduleSpecificTimeTask(DateTime scheduledTime , IScheduler scheduler)
+    {   //await scheduler.Start(); //初始化及啟動排程器
 
-        IJobDetail job = JobBuilder.Create<IntervalJob>() 
+        IJobDetail job = JobBuilder.Create<LogShow>()
             .WithIdentity("specificTimeJob", "group2")
             .Build();
 
         ITrigger trigger = TriggerBuilder.Create()
             .WithIdentity("specificTimeTrigger", "group2")
             .StartAt(scheduledTime)
+            .WithSimpleSchedule(x => x.WithMisfireHandlingInstructionIgnoreMisfires()) // 忽略已錯過的時間，不立即執行
             .Build();
 
         await scheduler.ScheduleJob(job, trigger);
@@ -147,15 +165,22 @@ public class SettingTime
     public DateTime ScheduledTime { get; set; }
 }
 
-public class IntervalJob : IJob
+public class LogShow : IJob
 {
     private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
+    private static DateTime? lastPrintedTime = null; // DateTime?：通常不能為null。此處設定為可以null，然後用此判斷 是否有打印過 或是 時間過長
+    private static int printCount = 0; // 計時器
 
     public Task Execute(IJobExecutionContext context)
     {
         var currentTime = DateTime.Now;
-        Logger.Info($"Current Time : {currentTime}"); //存成log記錄內容的字樣
-        Console.WriteLine($"Current Time : {currentTime}"); // 控制台顯示的打印字樣
+        if (lastPrintedTime == null || !lastPrintedTime.Value.Equals(currentTime)) //目前無效 //為了不重覆時間打印：判斷 當是null 或是 不為當下時間 才打印
+        {
+            printCount++;// 每次執行時增加計數器
+            Logger.Info($"[第{printCount}次] Current Time : {currentTime}"); //存成log記錄內容的字樣
+            Console.WriteLine($"[第{printCount}次] Current Time : {currentTime}"); // 控制台顯示的打印字樣
+            lastPrintedTime = currentTime;
+        }
         return Task.CompletedTask;
     }
 }
