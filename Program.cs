@@ -28,6 +28,9 @@ class Program
         #endregion
 
         #region ★配置變更監控與重新排程
+        //ChangeToken是屬於IChangeToken介面，為 .NET 配置系統中的一個類別，用來監控配置變化。OnChange是其靜態方法。
+        //第一個參數：檢查配置是否變更。當 IChangeToken 指示配置變更時，ChangeToken.OnChange 會觸發第二個參數
+        //() => 是 lambda表達式。 //()裡面可放參數，此處無。 //=>代表「去」，分隔用。 
         ChangeToken.OnChange(() => configuration.GetReloadToken(), async () =>
         {
             var currentReloadTime = DateTime.Now;
